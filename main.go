@@ -3,23 +3,23 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"io"
-	"library-manager/dbimport"
 	"library-manager/es"
 	"library-manager/logger"
+	"library-manager/model"
+	"library-manager/rest"
 	"os"
+	"strings"
 )
 
 var sContext = context.Background()
 
 func main() {
-	var les = es.MustCreateFromConfig()
-	esInfo, err := les.GetClient().Info()
-	if err != nil {
-		logger.Error.Fatalln(err)
-		return
-	}
-	logger.Info.Println(esInfo)
+	rest.InitRestAPI()
+}
+
+func doImport(les *es.LibraryES) {
 	//index代表表名，各个json字段对应列，id对应主键
 	fs, err := os.Open("dbimport/marc.csv")
 	defer func() {
@@ -38,7 +38,7 @@ func main() {
 	}
 	logger.Info.Printf("columns:%v", columns)
 	var index int64 = 0
-	var esMarc dbimport.ESBookMarc
+	var esMarc model.ESBookMarc
 	for {
 		row, err := csvReader.Read()
 		if err != nil && err != io.EOF {
@@ -49,20 +49,35 @@ func main() {
 			break
 		}
 		index++
-		logger.Info.Printf("handle %d -> %v", index, row)
+		//logger.Info.Printf("handle %d -> %v", index, row)
 		esMarc.MARCRecNo = row[0]
 		esMarc.CallNo = row[1]
-		esMarc.Tittle = row[2]
+		esMarc.Title = row[2]
 		esMarc.Author = row[3]
 		esMarc.Publisher = row[4]
-		pubYear, err := dbimport.ParsePubYear(row[5])
-		if err != nil {
-			logger.Error.Printf("%d %v", index, err)
-			break
+		//目前版本先跳过出版日期和ISBN
+		//esMarc.ISBN = row[6]
+
+		//logger.Info.Printf("%d -> %s", index, esMarc.ToJSON())
+		req := esapi.IndexRequest{
+			Index:      "marc",
+			DocumentID: esMarc.MARCRecNo,
+			Body:       strings.NewReader(esMarc.ToJSON()),
+			Refresh:    "true",
 		}
-		esMarc.PubYear = pubYear
-		esMarc.ISBN = row[6]
-		logger.Info.Printf("%d -> %s", index, esMarc.ToJSON())
+		resp, err := req.Do(sContext, les.GetClient())
+		if err != nil {
+			panic(err)
+		}
+		if resp.StatusCode != 201 && resp.StatusCode != 200 {
+			logger.Error.Println(resp.String())
+			return
+		}
+		err = resp.Body.Close() //回收连接
+		if err != nil {
+			panic(err)
+		}
+		logger.Info.Println(index)
 	}
 	logger.Info.Printf("all finished")
 }
